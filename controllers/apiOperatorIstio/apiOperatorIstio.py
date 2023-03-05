@@ -20,6 +20,7 @@ from kubernetes.client.rest import ApiException
 import os
 
 logging_level = os.environ.get('LOGGING',logging.INFO)
+
 print('Logging set to ',logging_level)
 
 kopf_logger = logging.getLogger()
@@ -37,11 +38,12 @@ APIS_PLURAL = "apis"
 
 # get environment variables
 OPENMETRICS_IMPLEMENTATION = os.environ.get('OPENMETRICS_IMPLEMENTATION', 'ServiceMonitor') # could be ServiceMonitor or PrometheusAnnotation or DataDogAnnotation
+
 print('Prometheus pattern set to ',OPENMETRICS_IMPLEMENTATION)
 
 
 @kopf.on.create('oda.tmforum.org', 'v1alpha4', 'apis', retries=5)
-@kopf.on.update('oda.tmforum.org', 'v1alpha4', 'apis', retries=5)
+@kopf.on.update('oda.tmforum.org', 'v1alpha4', 'apis', retries=10)
 def apiStatus(meta, spec, status, body, namespace, labels, name, **kwargs):
     """Handler function for new or updated APIs.
     
@@ -120,11 +122,72 @@ def createOrPatchObservability(patch, spec, namespace, name, inHandler, componen
 
 
 def createOrPatchPrometheusAnnotation(patch, spec, namespace, name, inHandler, componentName):   
-    logWrapper(logging.WARNING, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation", "Prometheus Annotation NOT IMPLEMENTED YET")
+    """Helper function to get API details for a prometheus metrics API and patch the corresponding kubernetes pod.
+    
+    Args:
+        * patch (Boolean): True to patch an existing annotation; False to create a new annotation. Makes no difference for this function.
+        * spec (Dict): The spec from the API Resource showing the intent (or desired state) 
+        * namespace (String): The namespace for the API Custom Resource
+        * name (String): The name of the API Custom Resource
+        * inHandler (String): The name of the handler function calling this function
+        * componentName (String): The name of the ODA Component that the API is part of
 
-    # This implementation not creted yet. Suggestion: copy the createOrPatchDataDogAnnotation - mopst of the logic is the same
+    Returns:
+        nothing
+    """
+    logWrapper(logging.INFO, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation", "Prometheus Annotation")
 
-    raise kopf.TemporaryError("Exception in createOrPatchPrometheusAnnotation.")   
+    # To get the pod name for the implementation, follow these steps:
+    # 1. The API has an 'implementation' field which is the name of the service that exposes the API.
+    # 2. The service will include a spec.selector which allows you to find the pod that implements the API.
+    # 3. Get the pod and amend the annotation
+
+    client = kubernetes.client
+    try:
+        # get the service
+        core_api = client.CoreV1Api()
+        apps_api = client.AppsV1Api()
+        service = core_api.read_namespaced_service(spec['implementation'], namespace)
+        selector = service.spec.selector
+
+        logWrapper(logging.INFO, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation selector=", selector)
+        # get the deployment name using the selector
+        key, value = next(iter(selector.items())) # get the first key/value pair - we don't have a way to handle multiple selectors
+        selectorQuery = key + '=' + value
+        logWrapper(logging.INFO, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation selectorQuery=", selectorQuery)
+
+        deploymentName = value
+
+        logWrapper(logging.INFO, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation deploymentName=", deploymentName)
+
+        path = None
+        if 'path' in spec.keys():
+            path=spec['path']
+        port = None
+        if 'port' in spec.keys():
+            port=spec['port']
+
+        deploymentBody={"spec": {"template": {
+                "metadata": {"annotations": {
+                    "prometheus.io/path": path,
+                    "prometheus.io/port": str(port),
+                    "prometheus.io/scrape": "true"
+
+                }
+                }
+            }
+            }
+            }
+        
+        logWrapper(logging.INFO, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "createOrPatchPrometheusAnnotation patching pod with annotation=", deploymentBody)
+
+        # patch the deployment
+        apps_api.patch_namespaced_deployment(deploymentName, namespace, deploymentBody)
+
+
+    except ApiException as e:
+        logWrapper(logging.WARNING, 'createOrPatchPrometheusAnnotation', inHandler, 'api/' + name, componentName, "Exception", e)
+        raise kopf.TemporaryError("Exception in createOrPatchPrometheusAnnotation.")    
 
 def createOrPatchDataDogAnnotation(patch, spec, namespace, name, inHandler, componentName):      
     """Helper function to get API details for a prometheus metrics API and patch the corresponding kubernetes pod.
@@ -586,4 +649,3 @@ def logWrapper(logLevel, functionName, handlerName, resourceName, componentName,
     """
     logger.log(logLevel, f"[{componentName}|{resourceName}|{handlerName}|{functionName}] {subject}: {message}")
     return
-
